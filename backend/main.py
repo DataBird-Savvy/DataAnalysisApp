@@ -2,6 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import pandas as pd
+from typing import List,Optional
+from fastapi import Query
 
 app = FastAPI()
 
@@ -21,20 +23,16 @@ supply_chain_df = pd.read_csv("data/wayne_supply_chain.csv")
 rd_portfolio_df = pd.read_csv("data/wayne_rd_portfolio.csv")
 financial_df["GVA"] = financial_df["Revenue_M"] - financial_df["Operating_Costs_M"]
 
-# Utility: fill NA and round floats for clean API
-def clean_df(df):
-    return df.fillna(0).round(2)
 
 # --- 1) Summary Stats ---
 @app.get("/api/summary")
-def get_summary():
+def get_summary(year: Optional[List[int]] = Query(None)):
+    df = financial_df.copy()
+    if year:
+        df = df[df["Year"].isin(year)]
     return {
-        "total_revenue": float(financial_df["Revenue"].sum()),
-        "total_profit": float(financial_df["Profit"].sum()),
-        "unique_employees": int(hr_df["EmployeeID"].nunique()),
-        "departments": int(hr_df["Department"].nunique()),
-        "active_suppliers": int(supply_chain_df["Supplier"].nunique()),
-        "total_rd_projects": int(rd_portfolio_df["Project_ID"].nunique())
+        "total_revenue": float(df["Revenue_M"].sum()),
+        "total_profit": float(df["Net_Profit_M"].sum()),
     }
 
 # --- 2) gdp-gva-yoy (Line Chart) ---
@@ -67,45 +65,50 @@ def get_gdp_gva_yoy():
 
     return output.to_dict(orient="records")
 
-# # --- 3) Revenue by Division (Horizontal Bar) ---
-# @app.get("/api/revenue-by-division")
-# def revenue_by_division():
-#     if 'Division' not in financial_df.columns:
-#         return JSONResponse(status_code=400, content={"error": "Division column missing in financial data"})
-#     division = financial_df.groupby("Division")[["Revenue"]].sum().reset_index()
-#     division = division.sort_values(by="Revenue", ascending=False)
-#     return clean_df(division).to_dict(orient="records")
+@app.get("/api/available-years")
+def get_available_years():
+    years = financial_df["Year"].dropna().unique().tolist()
+    return sorted(int(y) for y in years)
 
-# # --- 4) Employee Distribution (Pie) ---
-# @app.get("/api/employee-distribution")
-# def employee_distribution():
-#     dist = hr_df["Department"].value_counts().reset_index()
-#     dist.columns = ["Department", "Count"]
-#     return clean_df(dist).to_dict(orient="records")
 
-# # --- 5) Supply Chain Performance (Region) ---
-# @app.get("/api/supply-performance")
-# def supply_performance():
-#     if 'Region' not in supply_chain_df.columns:
-#         return JSONResponse(status_code=400, content={"error": "Region column missing in supply chain data"})
-#     perf = supply_chain_df.groupby("Region")["DeliveryTime"].mean().reset_index()
-#     perf.columns = ["Region", "AvgDeliveryTime"]
-#     return clean_df(perf).to_dict(orient="records")
+@app.get("/api/revenue-by-division-quarter")
+def revenue_by_division_quarter(year: Optional[List[int]] = Query(None)):
+    required_cols = {"Year", "Quarter", "Division", "Revenue_M"}
+    if not required_cols.issubset(financial_df.columns):
+        return {"error": f"Missing columns: {required_cols - set(financial_df.columns)}"}
 
-# # --- 6) Active vs. Completed R&D Projects (Pie) ---
-# @app.get("/api/rd-status")
-# def rd_status():
-#     if 'Status' not in rd_portfolio_df.columns:
-#         return JSONResponse(status_code=400, content={"error": "Status column missing in R&D portfolio data"})
-#     status_counts = rd_portfolio_df["Status"].value_counts().reset_index()
-#     status_counts.columns = ["Status", "Count"]
-#     return clean_df(status_counts).to_dict(orient="records")
+    df = financial_df.copy()
 
-# # --- 7) Patents Over Time (Bar) ---
-# @app.get("/api/rd-patents-trend")
-# def rd_patents_trend():
-#     if 'Year' not in rd_portfolio_df.columns:
-#         return JSONResponse(status_code=400, content={"error": "Year column missing in R&D portfolio data"})
-#     patents = rd_portfolio_df.groupby("Year")["Patent_Applications"].sum().reset_index()
-#     patents.columns = ["Year", "TotalPatents"]
-#     return clean_df(patents).to_dict(orient="records")
+    if year is not None:
+        df = df[df["Year"].isin(year)]
+
+    grouped = (
+        df.groupby(["Year", "Division", "Quarter"])["Revenue_M"]
+        .sum()
+        .reset_index()
+    )
+
+    result = {}
+    for y in grouped["Year"].unique():
+        year_df = grouped[grouped["Year"] == y]
+        divisions = year_df["Division"].unique().tolist()
+        quarters = sorted(year_df["Quarter"].unique().tolist())
+        values = []
+
+        for division in divisions:
+            subset = year_df[year_df["Division"] == division]
+            quarter_values = []
+            for q in quarters:
+                match = subset[subset["Quarter"] == q]
+                val = float(match["Revenue_M"].values[0]) if not match.empty else 0.0
+                quarter_values.append(val)
+            values.append(quarter_values)
+
+        result[int(y)] = {
+            "year": int(y),
+            "divisions": divisions,
+            "quarters": quarters,
+            "values": values
+        }
+
+    return result
